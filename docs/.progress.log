@@ -1,0 +1,32 @@
+# Documentation Generation Progress Log
+# Started: 2025-11-19
+# Repository: open-coreui
+# Commit: 9668d1c18b6cc005e36a89fe841a63856a700540
+
+✓ .SRCINFO -> .SRCINFO_docs.md
+✓ .gitattributes -> .gitattributes_docs.md
+✓ .github/workflows/build.yml -> .github/workflows/build.yml_docs.md
+✓ .gitignore -> .gitignore_docs.md
+✓ .gitmodules -> .gitmodules_docs.md
+✓ .vscode/extensions.json -> .vscode/extensions.json_docs.md
+✓ .vscode/settings.json -> .vscode/settings.json_docs.md
+✓ CLI.md -> CLI.md_docs.md
+✓ Makefile -> Makefile_docs.md
+✓ PKGBUILD -> PKGBUILD_docs.md
+✓ README.md -> README.md_docs.md
+✓ README.zh.md -> README.zh.md_docs.md
+✓ install.sh -> install.sh_docs.md
+✓ open-coreui-desktop.install -> open-coreui-desktop.install_docs.md
+✓ open-coreui.service.sample -> open-coreui.service.sample_docs.md
+✓ src-tauri/.gitignore -> src-tauri/.gitignore_docs.md
+✓ src-tauri/Cargo.toml -> src-tauri/Cargo.toml_docs.md
+✓ src-tauri/build.rs -> src-tauri/build.rs_docs.md
+✓ src-tauri/capabilities/default.json -> src-tauri/capabilities/default.json_docs.md
+✓ src-tauri/capabilities/desktop.json -> src-tauri/capabilities/desktop.json_docs.md
+✓ src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml -> src-tauri/icons/android/mipmap-anydpi-v26/ic_launcher.xml_docs.md
+✓ src-tauri/icons/android/values/ic_launcher_background.xml -> src-tauri/icons/android/values/ic_launcher_background.xml_docs.md
+✓ src-tauri/package.json -> src-tauri/package.json_docs.md
+✓ src-tauri/src/lib.rs -> src-tauri/src/lib.rs_docs.md
+✓ src-tauri/src/main.rs -> src-tauri/src/main.rs_docs.md
+✓ src-tauri/static/index.html -> src-tauri/static/index.html_docs.md
+✓ src-tauri/tauri.conf.json -> src-tauri/tauri.conf.json_docs.md

@@ -1,0 +1,448 @@
+# Documentation: build.yml
+
+## File Metadata
+
+- **File Path**: `.github/workflows/build.yml`
+- **Size**: 17,577 bytes
+- **Lines**: 363
+- **Words**: 1,351
+- **Extension**: `.yml`
+- **Type**: YAML configuration file
+
+## Original Source
+
+```yaml
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "backend/rust-backend/**"
+      - "backend/svelte-frontend/**"
+      - "src-tauri/**"
+      - ".github/workflows/build.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  # Build svelte frontend once and cache it
+  build-svelte-frontend:
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache-frontend.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Generate Frontend Cache Key
+        id: frontend-hash
+        run: |
+          HASH=$(find backend/svelte-frontend/src backend/svelte-frontend/static backend/svelte-frontend/package.json backend/svelte-frontend/bun.lock backend/svelte-frontend/vite.config.ts backend/svelte-frontend/svelte.config.js backend/svelte-frontend/tailwind.config.js -type f | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          echo "hash=$HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache Frontend Build
+        id: cache-frontend
+        uses: actions/cache@v4
+        with:
+          path: backend/svelte-frontend/build/
+          key: frontend-build-${{ steps.frontend-hash.outputs.hash }}
+          restore-keys: |
+            frontend-build-
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.cache-frontend.outputs.cache-hit != 'true'
+        with:
+          bun-version: latest
+
+      - name: Build Frontend
+        if: steps.cache-frontend.outputs.cache-hit != 'true'
+        run: make build-frontend-svelte
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: svelte-frontend-build
+          path: backend/svelte-frontend/build/
+          retention-days: 1
+
+  # Build backend and desktop in one job
+  build:
+    needs: build-svelte-frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: windows-latest
+            target: aarch64-pc-windows-msvc
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            './backend/rust-backend -> target'
+            './src-tauri -> target'
+          key: ${{ matrix.target }}
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Cache Tauri CLI
+        id: cache-tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-2.0.0-${{ runner.os }}-${{ matrix.target }}
+
+      - name: Install Tauri CLI
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
+        env:
+          RUSTC_WRAPPER: ""
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Download Frontend Build
+        uses: actions/download-artifact@v6
+        with:
+          name: svelte-frontend-build
+          path: backend/svelte-frontend/build/
+
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            # For ARM64 cross-compilation, configure multi-arch first
+            sudo dpkg --add-architecture arm64
+            sudo sed -i 's/deb http/deb [arch=amd64] http/g' /etc/apt/sources.list
+            sudo sed -i 's/deb mirror/deb [arch=amd64] mirror/g' /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted" | sudo tee -a /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted" | sudo tee -a /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy universe" | sudo tee -a /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates universe" | sudo tee -a /etc/apt/sources.list
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            sudo apt-get install -y libssl-dev:arm64 libwebkit2gtk-4.1-dev:arm64 libappindicator3-dev:arm64 librsvg2-dev:arm64 patchelf
+          else
+            sudo apt-get update
+            sudo apt-get install -y libssl-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          fi
+
+      - name: Build Backend (Unix)
+        if: runner.os != 'Windows'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          OPENSSL_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu' || matrix.target == 'x86_64-unknown-linux-gnu' && '/usr/lib/x86_64-linux-gnu' || '' }}
+          OPENSSL_INCLUDE_DIR: ${{ (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-unknown-linux-gnu') && '/usr/include' || '' }}
+          OPENSSL_LIB_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu' || matrix.target == 'x86_64-unknown-linux-gnu' && '/usr/lib/x86_64-linux-gnu' || '' }}
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
+          PKG_CONFIG_PATH: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
+          CARGO_PROFILE_RELEASE_LTO: thin
+        run: |
+          mkdir -p bin
+          cd backend/rust-backend
+          cargo fetch --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/open-webui-rust ../../bin/open-coreui-${{ matrix.target }}
+
+      - name: Build Backend (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+        run: |
+          mkdir bin
+          cd backend/rust-backend
+          cargo build --release --target ${{ matrix.target }}
+          copy target/${{ matrix.target }}/release/open-webui-rust.exe ..\..\bin\open-coreui-${{ matrix.target }}.exe
+
+      - name: Build Desktop (Unix)
+        if: runner.os != 'Windows'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_SYSROOT_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/aarch64-linux-gnu' || '' }}
+          OPENSSL_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu' || matrix.target == 'x86_64-unknown-linux-gnu' && '/usr/lib/x86_64-linux-gnu' || '' }}
+          OPENSSL_INCLUDE_DIR: ${{ (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-unknown-linux-gnu') && '/usr/include' || '' }}
+          OPENSSL_LIB_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu' || matrix.target == 'x86_64-unknown-linux-gnu' && '/usr/lib/x86_64-linux-gnu' || '' }}
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
+          PKG_CONFIG_PATH: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu/pkgconfig' || '' }}
+          CARGO_PROFILE_RELEASE_LTO: thin
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd src-tauri
+          cargo fetch --target ${{ matrix.target }}
+          cd ..
+          cargo tauri build --target ${{ matrix.target }}
+
+      - name: Build Desktop (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd src-tauri
+          cargo fetch --target ${{ matrix.target }}
+          cd ..
+          cargo tauri build --target ${{ matrix.target }}
+
+      - name: Build Arch Linux Package
+        if: runner.os == 'Linux'
+        run: |
+          # Install makepkg dependencies
+          sudo apt-get install -y binutils fakeroot
+
+          # Build Arch package
+          make build-arch-pkg
+
+          # Move to artifacts location
+          mkdir -p arch-pkg
+          mv *.pkg.tar.zst arch-pkg/ || true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*
+            bin/open-coreui-${{ matrix.target }}*
+            arch-pkg/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 90 || 30 }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+          pattern: build-*
+
+      - name: Organize Release Assets
+        run: |
+          mkdir -p release-assets
+
+          VERSION=$(cat src-tauri/tauri.conf.json | grep '"version"' | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+
+          # Copy desktop app packages (only the final installer packages)
+          find artifacts -name "*.deb" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*.rpm" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*.dmg" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*.msi" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*-setup.exe" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*.app.tar.gz" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*.AppImage" -type f -exec cp {} release-assets/ \;
+          find artifacts -name "*.pkg.tar.zst" -type f -exec cp {} release-assets/ \;
+
+          # Copy and rename backend binaries with version
+          find artifacts/build-x86_64-unknown-linux-gnu -name "open-coreui-x86_64-unknown-linux-gnu" -type f -exec cp {} release-assets/open-coreui-${VERSION}-x86_64-unknown-linux-gnu \;
+          find artifacts/build-aarch64-unknown-linux-gnu -name "open-coreui-aarch64-unknown-linux-gnu" -type f -exec cp {} release-assets/open-coreui-${VERSION}-aarch64-unknown-linux-gnu \;
+          find artifacts/build-x86_64-apple-darwin -name "open-coreui-x86_64-apple-darwin" -type f -exec cp {} release-assets/open-coreui-${VERSION}-x86_64-apple-darwin \;
+          find artifacts/build-aarch64-apple-darwin -name "open-coreui-aarch64-apple-darwin" -type f -exec cp {} release-assets/open-coreui-${VERSION}-aarch64-apple-darwin \;
+          find artifacts/build-x86_64-pc-windows-msvc -name "open-coreui-x86_64-pc-windows-msvc.exe" -type f -exec cp {} release-assets/open-coreui-${VERSION}-x86_64-pc-windows-msvc.exe \;
+          find artifacts/build-aarch64-pc-windows-msvc -name "open-coreui-aarch64-pc-windows-msvc.exe" -type f -exec cp {} release-assets/open-coreui-${VERSION}-aarch64-pc-windows-msvc.exe \;
+
+          ls -lh release-assets/
+
+      - name: Generate Checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Determine Release Type
+        id: release_info
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "tag_name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "tag_name=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Release Body
+        id: generate_body
+        run: |
+          TAG="${{ steps.release_info.outputs.tag_name }}"
+          REPO="${{ github.repository }}"
+          IS_RELEASE="${{ steps.release_info.outputs.is_release }}"
+          VERSION=$(cat src-tauri/tauri.conf.json | grep '"version"' | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+
+          if [ "$IS_RELEASE" == "true" ]; then
+            WARNING=""
+          else
+            WARNING="**⚠️ Development build - may be unstable**"$'\n\n'
+          fi
+
+          cat > release_body.md << 'EOF'
+          ${WARNING}## Desktop Application
+
+          | Platform | Architecture | Download |
+          |----------|-------------|----------|
+          | Windows | x64 | [Open.CoreUI.Desktop_${VERSION}_x64-setup.exe](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_x64-setup.exe) / [.msi](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_x64_en-US.msi) |
+          | Windows | ARM64 | [Open.CoreUI.Desktop_${VERSION}_arm64-setup.exe](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_arm64-setup.exe) / [.msi](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_arm64_en-US.msi) |
+          | macOS | Intel | [Open.CoreUI.Desktop_${VERSION}_x64.dmg](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_x64.dmg) |
+          | macOS | Apple Silicon | [Open.CoreUI.Desktop_${VERSION}_aarch64.dmg](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_aarch64.dmg) |
+          | Linux | x64 | [Open.CoreUI.Desktop_${VERSION}_amd64.deb](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_amd64.deb) / [.rpm](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop-${VERSION}-1.x86_64.rpm) / [.pkg.tar.zst](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-desktop-${VERSION}-1-x86_64.pkg.tar.zst) |
+          | Linux | ARM64 | [Open.CoreUI.Desktop_${VERSION}_arm64.deb](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop_${VERSION}_arm64.deb) / [.rpm](https://github.com/${REPO}/releases/download/${TAG}/Open.CoreUI.Desktop-${VERSION}-1.aarch64.rpm) / [.pkg.tar.zst](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-desktop-${VERSION}-1-aarch64.pkg.tar.zst) |
+
+          > **macOS Users**: If you see "app is damaged" error, run this command in Terminal App:
+          > 
+          > ```bash
+          > sudo xattr -d com.apple.quarantine "/Applications/Open CoreUI Desktop.app"
+          > ```
+
+          ## Backend Server (CLI)
+
+          | Platform | Architecture | Binary |
+          |----------|-------------|--------|
+          | Linux | x64 | [open-coreui-${VERSION}-x86_64-unknown-linux-gnu](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-${VERSION}-x86_64-unknown-linux-gnu) |
+          | Linux | ARM64 | [open-coreui-${VERSION}-aarch64-unknown-linux-gnu](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-${VERSION}-aarch64-unknown-linux-gnu) |
+          | macOS | Intel | [open-coreui-${VERSION}-x86_64-apple-darwin](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-${VERSION}-x86_64-apple-darwin) |
+          | macOS | Apple Silicon | [open-coreui-${VERSION}-aarch64-apple-darwin](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-${VERSION}-aarch64-apple-darwin) |
+          | Windows | x64 | [open-coreui-${VERSION}-x86_64-pc-windows-msvc.exe](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-${VERSION}-x86_64-pc-windows-msvc.exe) |
+          | Windows | ARM64 | [open-coreui-${VERSION}-aarch64-pc-windows-msvc.exe](https://github.com/${REPO}/releases/download/${TAG}/open-coreui-${VERSION}-aarch64-pc-windows-msvc.exe) |
+          EOF
+
+          # Replace variables
+          sed -i "s|\${WARNING}|${WARNING}|g" release_body.md
+          sed -i "s|\${REPO}|${REPO}|g" release_body.md
+          sed -i "s|\${TAG}|${TAG}|g" release_body.md
+          sed -i "s|\${VERSION}|${VERSION}|g" release_body.md
+
+          {
+            echo "body<<EOFMARKER"
+            cat release_body.md
+            echo "EOFMARKER"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: ${{ steps.release_info.outputs.is_release == 'true' && format('Release {0}', steps.release_info.outputs.tag_name) || format('Development Build ({0})', steps.release_info.outputs.tag_name) }}
+          body: ${{ steps.generate_body.outputs.body }}
+          files: release-assets/*
+          prerelease: ${{ steps.release_info.outputs.prerelease }}
+          draft: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+```
+
+## High-Level Overview
+
+This configuration file defines structured settings for the application.
+
+**Purpose**: Configuration data in YML format.
+
+**Usage**: Loaded by the application or build system to configure behavior.
+
+
+## Detailed Walkthrough
+
+### Configuration Structure
+
+This configuration file contains 363 lines of structured data defining application settings, dependencies, or metadata.
+
+
+## Key Components
+
+### Configurations
+
+- `CARGO_PROFILE_RELEASE_LTO`
+- `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER`
+- `CARGO_TERM_COLOR`
+- `GITHUB_TOKEN`
+- `OPENSSL_DIR`
+- `OPENSSL_INCLUDE_DIR`
+- `OPENSSL_LIB_DIR`
+- `PKG_CONFIG_ALLOW_CROSS`
+- `PKG_CONFIG_PATH`
+- `PKG_CONFIG_SYSROOT_DIR`
+- `RUSTC_WRAPPER`
+- `SCCACHE_GHA_ENABLED`
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- `body`
+- `branches`
+- `build`
+- `concurrency`
+- `contents`
+- `draft`
+- *(and 33 more)*
+
+
+
+## Usage Examples
+
+*Usage examples depend on the application context.*
+
+
+## Performance & Security Notes
+
+⚠️ **Security**: This file may contain sensitive information. Ensure proper access controls.
+
+
+## Related Files
+
+- **Parent Directory**: `.github/workflows/`
+
+## Testing & Execution
+
+*Testing information not applicable for this file type.*
+
+
+---
+
+*Generated: 2025-11-19T02:08:05.468748*
+*Source: `.github/workflows/build.yml`*
+*Repository: http://local_proxy@127.0.0.1:46101/git/raminpapo/open-coreui*
+*Commit: 9668d1c1*
